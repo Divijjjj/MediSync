@@ -40,6 +40,7 @@
             text-align: left;
             font-size: 16px;
             color: #333;
+            position: relative;
         }
         .doc-name {
             color: #007bff;
@@ -67,6 +68,44 @@
         .book-btn:hover {
             background: #0056b3;
         }
+        
+        /* Doctor Status Indicator */
+        .doc-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-top: 8px;
+        }
+        .doc-status.available {
+            background: #d4edda;
+            color: #155724;
+        }
+        .doc-status.busy {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .doc-status.offline {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+        .status-dot.available {
+            background: #28a745;
+        }
+        .status-dot.busy {
+            background: #ffc107;
+        }
+        .status-dot.offline {
+            background: #dc3545;
+        }
     </style>
 </head>
 <body>
@@ -77,15 +116,70 @@
                 <div class="doc-card">No doctors available for this specialization.</div>
             <% } else { %>
                 <% doctors.forEach(function(doc) { %>
-                    <div class="doc-card">
+                    <div class="doc-card" data-doctor-id="<%= doc.id %>">
                         <div class="doc-name"><%= doc.name %></div>
                         <div class="doc-contact">Contact: <%= doc.contact %></div>
                         <div class="doc-schedule">Schedule: <%= doc.schedule %></div>
+                        <div class="doc-status offline" id="status-<%= doc.id %>">
+                            <span class="status-dot offline"></span>
+                            <span class="status-text">OFFLINE</span>
+                        </div>
                         <a href="/patients/book-appointment/<%= doc.id %>" class="book-btn">Book Appointment</a>
                     </div>
                 <% }); %>
             <% } %>
         </div>
     </div>
+    
+    <!-- Socket.IO Client Script -->
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        
+        socket.on('connect', function() {
+            console.log('✅ Connected to Socket.IO server');
+        });
+        
+        // Load all doctor statuses on page load
+        async function loadDoctorStatuses() {
+            try {
+                const response = await fetch('/doctors/status/all');
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Update each doctor's status
+                    Object.entries(data.statuses).forEach(([doctorId, status]) => {
+                        updateDoctorStatusUI(doctorId, status);
+                    });
+                    console.log('✅ Loaded statuses for', Object.keys(data.statuses).length, 'doctors');
+                }
+            } catch (error) {
+                console.error('Error loading doctor statuses:', error);
+            }
+        }
+        
+        // Update doctor status UI
+        function updateDoctorStatusUI(doctorId, status) {
+            const statusElement = document.getElementById('status-' + doctorId);
+            if (!statusElement) return;
+            
+            const statusDot = statusElement.querySelector('.status-dot');
+            const statusText = statusElement.querySelector('.status-text');
+            
+            // Remove all status classes
+            statusElement.className = 'doc-status ' + status;
+            statusDot.className = 'status-dot ' + status;
+            statusText.textContent = status.toUpperCase();
+        }
+        
+        // Listen for real-time status changes
+        socket.on('doctorStatusChanged', function(data) {
+            console.log('👨‍⚕️ Doctor status changed:', data);
+            updateDoctorStatusUI(data.doctorId, data.status);
+        });
+        
+        // Load statuses on page load
+        loadDoctorStatuses();
+    </script>
 </body>
 </html>

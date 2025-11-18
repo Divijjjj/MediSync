@@ -27,6 +27,103 @@ const server = http.createServer(app);
 const { Server } = require('socket.io');
 const io = new Server(server);
 
+// Redis Setup (Optional - will fallback to direct Socket.IO if unavailable)
+const redis = require('redis');
+
+// Redis Cloud credentials
+const REDIS_ENABLED = true; // Set to false to disable Redis temporarily
+
+const redisConfig = {
+    username: 'default',
+    password: 'tly0jU3fdQ2wMtknSjCRbPUMJEHspkjx',
+    socket: {
+        host: 'redis-12116.c98.us-east-1-4.ec2.cloud.redislabs.com',
+        port: 12116,
+        connectTimeout: 10000,
+        reconnectStrategy: (retries) => {
+            if (retries > 3) {
+                console.log('⚠️  Redis: Stopping reconnection attempts');
+                return false; // Stop reconnecting after 3 attempts
+            }
+            return Math.min(retries * 1000, 3000); // Wait 1s, 2s, 3s between retries
+        }
+    }
+};
+
+let redisClient, redisPublisher, redisSubscriber;
+
+if (REDIS_ENABLED) {
+    // Create Redis client for caching
+    redisClient = redis.createClient(redisConfig);
+    redisPublisher = redis.createClient(redisConfig);
+    redisSubscriber = redis.createClient(redisConfig);
+
+    // Handle Redis errors (prevent crash)
+    redisClient.on('error', (err) => {
+        console.error('⚠️  Redis Cache:', err.code === 'ENOTFOUND' ? 'Cannot reach server' : err.message);
+    });
+
+    redisPublisher.on('error', (err) => {
+        console.error('⚠️  Redis Publisher:', err.code === 'ENOTFOUND' ? 'Cannot reach server' : err.message);
+    });
+
+    redisSubscriber.on('error', (err) => {
+        console.error('⚠️  Redis Subscriber:', err.code === 'ENOTFOUND' ? 'Cannot reach server' : err.message);
+    });
+
+    // Connect Redis clients with error handling
+    redisClient.connect().then(() => {
+        console.log('✅ Redis cache client connected to Redis Cloud');
+    }).catch(err => {
+        console.error('⚠️  Redis cache client connection failed');
+        console.log('ℹ️  Application will continue without Redis caching');
+    });
+
+    redisPublisher.connect().then(() => {
+        console.log('✅ Redis publisher connected to Redis Cloud');
+    }).catch(err => {
+        console.error('⚠️  Redis publisher connection failed');
+        console.log('ℹ️  Application will continue without Redis pub/sub');
+    });
+
+    redisSubscriber.connect().then(() => {
+        console.log('✅ Redis subscriber connected to Redis Cloud');
+        
+        // Subscribe to Redis channels only after successful connection
+        redisSubscriber.subscribe('appointment:created', (message) => {
+            console.log('📨 Redis: appointment:created event received');
+            const data = JSON.parse(message);
+            console.log('   Broadcasting to doctor:', data.doctorId);
+            io.emit('appointmentBooked', data);
+        });
+
+        redisSubscriber.subscribe('appointment:updated', (message) => {
+            console.log('📨 Redis: appointment:updated event received');
+            const data = JSON.parse(message);
+            console.log('   Broadcasting to patient:', data.patientId);
+            io.emit('appointmentStatusUpdated', data);
+        });
+
+        // Subscribe to doctor status changes
+        redisSubscriber.subscribe('doctor:status:changed', (message) => {
+            console.log('📨 Redis: doctor:status:changed event received');
+            const data = JSON.parse(message);
+            console.log('   Doctor', data.doctorId, 'status changed to:', data.status);
+            io.emit('doctorStatusChanged', data);
+        });
+
+        console.log('🔔 Subscribed to Redis channels: appointment:created, appointment:updated, doctor:status:changed');
+    }).catch(err => {
+        console.error('⚠️  Redis subscriber connection failed');
+        console.log('ℹ️  Real-time updates will use direct Socket.IO (without Redis)');
+    });
+} else {
+    console.log('ℹ️  Redis is DISABLED - using direct Socket.IO for real-time updates');
+    redisClient = null;
+    redisPublisher = null;
+    redisSubscriber = null;
+}
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
     console.log('✅ A user connected:', socket.id);
@@ -38,8 +135,10 @@ io.on('connection', (socket) => {
     });
 });
 
-// Make io accessible in routes (MUST be before routes that use it)
+// Make io and Redis accessible in routes
 app.set('io', io);
+app.set('redisClient', redisClient);
+app.set('redisPublisher', redisPublisher);
 
 // Add direct POST route for doctor registration so the form works
 const { registerDoctor } = require('./controllers/doctorsController');
@@ -96,28 +195,63 @@ app.post('/patients/book-appointment/:doctorId', patientAuth, async (req, res) =
         const appointmentId = insertResult.rows[0].id;
         client.release();
         
-        // Emit Socket.IO event for real-time update
-        const io = req.app.get('io');
-        if (!io) {
-            console.error('❌ ERROR: Socket.IO instance not found!');
+        console.log('📋 New appointment created:');
+        console.log('   Appointment ID:', appointmentId);
+        console.log('   Doctor ID:', doctorId);
+        console.log('   Patient:', patientName);
+        
+        // Invalidate Redis cache for this doctor (CRITICAL for showing new appointments)
+        const redisClient = req.app.get('redisClient');
+        const cacheKey = `appointments:${doctorId}`;
+        
+        if (redisClient && redisClient.isOpen) {
+            try {
+                const deletedCount = await redisClient.del(cacheKey);
+                if (deletedCount > 0) {
+                    console.log('✅ Cache INVALIDATED for doctor:', doctorId, '(key:', cacheKey + ')');
+                } else {
+                    console.log('ℹ️  No cache to invalidate for doctor:', doctorId, '(key was not in cache)');
+                }
+            } catch (cacheErr) {
+                console.error('❌ Cache invalidation error:', cacheErr.message);
+            }
         } else {
-            console.log('📡 Emitting appointmentBooked event...');
-            console.log('   Doctor ID:', parseInt(doctorId));
+            console.log('⚠️  Redis client not available, skipping cache invalidation');
+        }
+        
+        // Event data for real-time updates
+        const eventData = {
+            doctorId: parseInt(doctorId),
+            patientName: patientName,
+            timeSlot: `${appointment_date} ${start_time} - ${end_time}`,
+            appointmentId: appointmentId,
+            appointmentDate: appointment_date,
+            startTime: start_time,
+            endTime: end_time,
+            status: 'pending'
+        };
+        
+        // Use Redis Pub/Sub if available, otherwise use direct Socket.IO
+        const redisPublisher = req.app.get('redisPublisher');
+        if (redisPublisher && redisPublisher.isOpen) {
+            try {
+                await redisPublisher.publish('appointment:created', JSON.stringify(eventData));
+                console.log('📤 Published to Redis: appointment:created for doctor:', doctorId);
+                console.log('   Flow: Redis Pub/Sub → Socket.IO → Doctor Dashboard EJS');
+            } catch (pubErr) {
+                console.log('Redis publish error:', pubErr.message);
+                // Fallback to direct Socket.IO
+                const io = req.app.get('io');
+                io.emit('appointmentBooked', eventData);
+                console.log('📡 Fallback: Direct Socket.IO emit (Redis unavailable)');
+            }
+        } else {
+            // No Redis - use direct Socket.IO
+            const io = req.app.get('io');
+            io.emit('appointmentBooked', eventData);
+            console.log('📡 Direct Socket.IO emit for doctor:', doctorId);
             console.log('   Patient Name:', patientName);
             console.log('   Appointment ID:', appointmentId);
-            
-            io.emit('appointmentBooked', {
-                doctorId: parseInt(doctorId),
-                patientName: patientName,
-                timeSlot: `${appointment_date} ${start_time} - ${end_time}`,
-                appointmentId: appointmentId,
-                appointmentDate: appointment_date,
-                startTime: start_time,
-                endTime: end_time,
-                status: 'pending'
-            });
-            
-            console.log('✅ appointmentBooked event emitted successfully');
         }
         
         // Redirect to confirmation page

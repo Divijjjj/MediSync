@@ -13,7 +13,7 @@
             margin: 0;
         }
         .container {
-            max-width: 600px;
+            max-width: 900px;
             margin: 60px auto;
             background: rgba(240,248,255,0.97);
             padding: 40px 32px;
@@ -30,6 +30,86 @@
             color: #333;
             margin-bottom: 24px;
         }
+        
+        /* Status Controls */
+        .status-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 30px;
+        }
+        .status-label {
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 12px;
+        }
+        .status-buttons {
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+        }
+        .status-btn {
+            padding: 10px 24px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            background: white;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+        .status-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .status-btn.active {
+            border-width: 3px;
+        }
+        .status-btn.available {
+            color: #28a745;
+            border-color: #28a745;
+        }
+        .status-btn.available.active {
+            background: #28a745;
+            color: white;
+        }
+        .status-btn.busy {
+            color: #ffc107;
+            border-color: #ffc107;
+        }
+        .status-btn.busy.active {
+            background: #ffc107;
+            color: white;
+        }
+        .status-btn.offline {
+            color: #dc3545;
+            border-color: #dc3545;
+        }
+        .status-btn.offline.active {
+            background: #dc3545;
+            color: white;
+        }
+        .current-status {
+            display: inline-block;
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 14px;
+            margin-left: 12px;
+        }
+        .current-status.available {
+            background: #d4edda;
+            color: #155724;
+        }
+        .current-status.busy {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .current-status.offline {
+            background: #f8d7da;
+            color: #721c24;
+        }
     </style>
 </head>
 <body>
@@ -43,7 +123,24 @@
         <% } else { %>
             <div class="welcome">Welcome, Doctor!</div>
         <% } %>
-        <p>This is your dashboard. You can add more features here.</p>
+        
+        <!-- Doctor Status Section -->
+        <div class="status-section">
+            <div class="status-label">
+                Your Status: <span id="current-status-badge" class="current-status offline">OFFLINE</span>
+            </div>
+            <div class="status-buttons">
+                <button class="status-btn available" onclick="updateStatus('available')">
+                    🟢 Available
+                </button>
+                <button class="status-btn busy" onclick="updateStatus('busy')">
+                    🟡 Busy
+                </button>
+                <button class="status-btn offline" onclick="updateStatus('offline')">
+                    🔴 Offline
+                </button>
+            </div>
+        </div>
 
         <% if (appointments && appointments.length > 0) { %>
             <h3 style="margin-top:32px; color:#007bff;">Your Appointments</h3>
@@ -204,6 +301,78 @@
         socket.on('disconnect', function() {
             console.log('⚠️ Disconnected from Socket.IO server');
         });
+        
+        // ============ DOCTOR STATUS FUNCTIONALITY ============
+        
+        // Fetch current status on page load
+        async function loadCurrentStatus() {
+            try {
+                const response = await fetch('/doctors/status');
+                const data = await response.json();
+                updateStatusUI(data.status);
+            } catch (error) {
+                console.error('Error loading status:', error);
+            }
+        }
+        
+        // Update doctor status
+        async function updateStatus(newStatus) {
+            try {
+                const response = await fetch('/doctors/status/update', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ status: newStatus })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    updateStatusUI(newStatus);
+                    console.log('✅ Status updated to:', newStatus);
+                } else {
+                    alert('Failed to update status: ' + data.error);
+                }
+            } catch (error) {
+                console.error('Error updating status:', error);
+                alert('Network error. Please try again.');
+            }
+        }
+        
+        // Update status UI elements
+        function updateStatusUI(status) {
+            const badge = document.getElementById('current-status-badge');
+            const buttons = document.querySelectorAll('.status-btn');
+            
+            // Remove all active classes
+            buttons.forEach(btn => btn.classList.remove('active'));
+            
+            // Update badge
+            badge.className = 'current-status ' + status;
+            badge.textContent = status.toUpperCase();
+            
+            // Highlight active button
+            const activeBtn = document.querySelector('.status-btn.' + status);
+            if (activeBtn) {
+                activeBtn.classList.add('active');
+            }
+        }
+        
+        // Listen for real-time status changes (from other sessions)
+        socket.on('doctorStatusChanged', function(data) {
+            console.log('👨‍⚕️ Doctor status changed:', data);
+            
+            // Update UI if it's this doctor's status
+            if (data.doctorId === doctorId) {
+                updateStatusUI(data.status);
+            }
+        });
+        
+        // Load current status on page load
+        if (doctorId) {
+            loadCurrentStatus();
+        }
     </script>
 </body>
 </html>
